@@ -1,33 +1,168 @@
-Connect-MgGraph -TenantId "c85378eb-9c50-4d53-bd17-7e7e1f20933a"
+#requires -Version 7.0
 
-\$PasswordProfile = @{
-    Password = "TempPass2026!ChangeMe"
-    ForceChangePasswordNextSignIn = \$true
+<#
+.SYNOPSIS
+    Manage and verify the Helpdesk Administrator directory role.
+
+.DESCRIPTION
+    Microsoft Graph PowerShell lab project.
+    Retrieves an existing user, locates the directory role,
+    activates it if necessary, assigns it if missing, and verifies
+    the final membership.
+
+.NOTES
+    Requires an authorized administrator account and appropriate
+    Microsoft Graph delegated permissions.
+#>
+
+[CmdletBinding()]
+param(
+    [string]$TenantId = "c85378eb-9c50-4d53-bd17-7e7e1f20933a",
+
+    [string]$UserPrincipalName =
+        "marcus.gisdol@GadzhevLTD.onmicrosoft.com",
+
+    [string]$RoleName = "Helpdesk Administrator"
+)
+
+$ErrorActionPreference = "Stop"
+
+try {
+    # STEP 1 - Import required modules
+    $RequiredModules = @(
+        "Microsoft.Graph.Authentication",
+        "Microsoft.Graph.Users",
+        "Microsoft.Graph.Identity.DirectoryManagement"
+    )
+
+    foreach ($ModuleName in $RequiredModules) {
+        if (-not (Get-Module -ListAvailable -Name $ModuleName)) {
+            throw "Missing module: $ModuleName. Install it before running this script."
+        }
+
+        Import-Module $ModuleName -ErrorAction Stop
+    }
+
+    # STEP 2 - Connect to the correct tenant
+    $Context = Get-MgContext
+
+    if (
+        -not $Context -or
+        $Context.TenantId -ne $TenantId
+    ) {
+        if ($Context) {
+            Disconnect-MgGraph | Out-Null
+        }
+
+        Connect-MgGraph `
+            -TenantId $TenantId `
+            -Scopes @(
+                "User.Read.All",
+                "RoleManagement.ReadWrite.Directory"
+            ) `
+            -NoWelcome
+    }
+
+    Write-Host "`nConnected to Microsoft Graph." -ForegroundColor Green
+
+    # STEP 3 - Retrieve the existing user
+    $User = Get-MgUser `
+        -UserId $UserPrincipalName `
+        -Property Id, DisplayName, UserPrincipalName
+
+    if (-not $User) {
+        throw "User not found: $UserPrincipalName"
+    }
+
+    Write-Host "User found: $($User.DisplayName)" -ForegroundColor Green
+
+    # STEP 4 - Find the directory role template
+    $RoleTemplates = @(
+        Get-MgDirectoryRoleTemplate |
+            Where-Object { $_.DisplayName -eq $RoleName }
+    )
+
+    if ($RoleTemplates.Count -eq 0) {
+        throw "Role template not found: $RoleName"
+    }
+
+    $RoleTemplate = $RoleTemplates[0]
+
+    # STEP 5 - Retrieve or activate the directory role
+    $ActiveRoles = @(
+        Get-MgDirectoryRole |
+            Where-Object {
+                $_.RoleTemplateId -eq $RoleTemplate.Id
+            }
+    )
+
+    if ($ActiveRoles.Count -gt 0) {
+        $ActiveRole = $ActiveRoles[0]
+    }
+    else {
+        Write-Host "Activating directory role..." -ForegroundColor Yellow
+
+        $ActiveRole = New-MgDirectoryRole `
+            -RoleTemplateId $RoleTemplate.Id
+    }
+
+    Write-Host "Role found: $($ActiveRole.DisplayName)" -ForegroundColor Green
+
+    # STEP 6 - Check whether the user already has the role
+    $Members = @(
+        Get-MgDirectoryRoleMember `
+            -DirectoryRoleId $ActiveRole.Id `
+            -All
+    )
+
+    $AlreadyAssigned = @(
+        $Members |
+            Where-Object { $_.Id -eq $User.Id }
+    ).Count -gt 0
+
+    # STEP 7 - Assign the role only if missing
+    if ($AlreadyAssigned) {
+        Write-Host "User already has this role." -ForegroundColor Yellow
+    }
+    else {
+        $OdataIdUrl = "https://graph.microsoft.com/v1.0/directoryObjects/$($User.Id)"
+
+        New-MgDirectoryRoleMemberByRef `
+            -DirectoryRoleId $ActiveRole.Id `
+            -OdataId $OdataIdUrl
+
+        Write-Host "Role assignment request submitted." -ForegroundColor Green
+    }
+
+    # STEP 8 - Verify membership after assignment
+    $MembersAfter = @(
+        Get-MgDirectoryRoleMember `
+            -DirectoryRoleId $ActiveRole.Id `
+            -All
+    )
+
+    $Verified = @(
+        $MembersAfter |
+            Where-Object { $_.Id -eq $User.Id }
+    ).Count -gt 0
+
+    if (-not $Verified) {
+        throw "Role membership verification failed."
+    }
+
+    # STEP 9 - Display the verified result
+    Write-Host "`nSUCCESS: Role membership verified." -ForegroundColor Green
+
+    [PSCustomObject]@{
+        DisplayName        = $User.DisplayName
+        UserPrincipalName  = $User.UserPrincipalName
+        UserId             = $User.Id
+        RoleName           = $ActiveRole.DisplayName
+        RoleId             = $ActiveRole.Id
+        AssignmentVerified = $Verified
+    } | Format-List
 }
-
-New-MgUser `
-    -DisplayName "Marcus Gisdol" `
-    -UserPrincipalName "marcus.gisdol@GadzhevLTD.onmicrosoft.com" `
-    -MailNickname "mgisdol" `
-    -AccountEnabled \$true `
-    -PasswordProfile $PasswordProfile
-
-# PART 2: ASSIGN HELPDESK ADMINISTRATOR ROLE
-$RoleTemplate = Get-MgDirectoryRoleTemplate |
-    Where-Object { $_.DisplayName -eq "Helpdesk Administrator" }
-
-$User = Get-MgUser `
-    -Filter "userPrincipalName eq 'marcus.gisdol@GadzhevLTD.onmicrosoft.com'"
-
-\(RoleTemplate \vert{} Select-Object Id, DisplayName\)User | Select-Object Id, DisplayName, UserPrincipalName
-
-\$ActiveRole = Get-MgDirectoryRole |
-    Where-Object { \(_.RoleTemplateId -eq\)RoleTemplate.Id }
-
-if (-not \$ActiveRole) {
-    ActiveRole = New-MgDirectoryRole -RoleTemplateId RoleTemplate.Id
+catch {
+    Write-Host "`nERROR: $($_.Exception.Message)" -ForegroundColor Red
+    throw
 }
-
-New-MgDirectoryRoleMemberByRef `
-    -DirectoryRoleId $ActiveRole.Id `
-    -OdataId "https://microsoft.com"
